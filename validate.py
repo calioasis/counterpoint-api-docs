@@ -23,9 +23,9 @@ for path, item in spec["paths"].items():
         assert op["operationId"] not in seen
         seen.add(op["operationId"])
         assert op["responses"] and op["tags"]
-for name in ("index.html", "site.js", "site.css", "changelog.html", "vendor/redoc-2.5.4.standalone.js", "vendor/LICENSE.redoc"):
+for name in ("index.html", "reference.html", "quickstart.template.html", "quickstart.js", "site.js", "site.css", "changelog.html", "vendor/redoc-2.5.4.standalone.js", "vendor/LICENSE.redoc"):
     assert (root / name).is_file(), name
-for name in ("openapi.json", "index.html", "site.js", "site.css", "changelog.html", "README.md"):
+for name in ("openapi.json", "index.html", "reference.html", "quickstart.template.html", "quickstart.js", "site.js", "site.css", "changelog.html", "README.md"):
     content = (root / name).read_text()
     assert not re.search(r"cp_sf_(?:test|production)_[A-Za-z0-9_-]{20,}|onetimesecret\.com/secret/|-----BEGIN .*PRIVATE KEY", content), "Credential material in " + name
 print("Documentation checks passed: JSON, local references, operation IDs, assets, and credential-pattern scan.")

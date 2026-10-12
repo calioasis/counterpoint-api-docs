@@ -29,3 +29,5 @@ Run `python3 validate.py`, then `python3 -m http.server 8080` in this directory.
 - `.github/workflows/pages.yml`: validate and deploy.
 
 This is a public documentation repository. Never add API keys, retrieval links, passphrases, production records, internal operational notes, or backend source code.
+
+The landing page shows request JSON and required-field tables generated from openapi.json. After changing the contract or quickstart template, run `python3 build.py` and commit index.html. CI checks that it is current. Full Redoc documentation is at reference.html.

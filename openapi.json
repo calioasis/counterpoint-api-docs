@@ -1,0 +1,2127 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Counterpoint Salesforce Event and Task API",
+    "version": "1.0.0",
+    "description": "Counterpoint\u2019s integration API for Salesforce Events and Tasks. This reference is the published v1 contract. The sandbox supports creation and source-ID lookup.\n\n## Getting started\n\n1. Obtain your API key through the separate secure handoff. No key is published here.\n2. Send `Authorization: Bearer <API key>` on every request and `Content-Type: application/json` for POST.\n3. Call `GET /v1/health` against the sandbox server below. Expect `status: \"ok\"` and `environment: \"test\"`. Health confirms authentication and configuration, not database or Outlook readiness.\n4. Use the exact, case-sensitive `wsname: \"Jeff\"` and fictional `advisor_repcrd` `\"2147483000\"`, `\"2147483001\"`, or `\"2147483002\"`. Other advisors are rejected in this sandbox.\n5. Replace the illustrative Salesforce IDs in the examples with your own 18-character sandbox IDs. Generate and save a new UUID v4 request ID for each new creation.\n\n## Events and Tasks\n\n**Events** create a Counterpoint meeting and queue an Outlook appointment. In this sandbox, appointments go only to the separate **Counterpoint API Tests** calendar, with no attendees. Internal notes are not sent to Outlook. Salesforce must not independently create a second Outlook appointment for the same Event.\n\n**Tasks** create a completed Counterpoint Sales Activity, without an Outlook appointment. Pending follow-up reminders are not supported. Preserve `counterpoint_activity_id` separately from Event meeting IDs.\n\n## Idempotency and recovery\n\nPersist the request UUID, Salesforce record ID, and exact payload before sending. New creation returns HTTP **201** and `reused: false`. Retry the same UUID, record ID, and payload after a timeout or lost response. A committed replay returns HTTP **200**, the original Counterpoint ID, and `reused: true`. JSON property order does not matter.\n\nConflicting content, or a new UUID for an already-linked Salesforce record, returns **409 SOURCE_CONFLICT**. Use source-ID lookup to reconcile; do not invent new IDs to bypass a conflict. A lookup 404 does not prove an in-flight create failed. Retry the original request identity.\n\n## Errors and retries\n\nErrors contain `error.code`, `error.message`, nullable `error.field`, `error.retryable`, and `correlation_id`. Retain the correlation ID for support; do not log credentials or complete request bodies.\n\n| Status | Meaning | Action |\n| --- | --- | --- |\n| 400 | Malformed JSON or unsupported query parameters | Correct the request. |\n| 401 | Missing or invalid credential | Fix the credential configuration. |\n| 403 | Owner not allowed | Check the wholesaler mapping and scope. |\n| 404 | Route or linked record not found | Check the path; recover uncertain creates using the original identity. |\n| 409 | Conflicting identity, missing linked record, or meeting collision | Reconcile; do not blindly create another record. |\n| 413 / 415 | Payload too large or unsupported content type | Use UTF-8 JSON within 32 KB. |\n| 422 | Invalid field or missing owner/advisor mapping | Correct the indicated field. `SANDBOX_ADVISOR_REQUIRED` means use a supplied fictional advisor. |\n| 429 | Rate limited | Respect `Retry-After`; retry the same request. |\n| 500 | Unexpected failure; outcome may be unknown | Retry the same request with bounds; escalate persistent failures. |\n| 503 | Temporarily unavailable or configuration problem | Inspect `error.retryable`; disabled/misconfigured integrations require administrator action. |\n\nFor timeouts, gateway 502/503/504 responses, and retryable errors, use bounded exponential backoff with jitter. Preserve the same request identity and respect `Retry-After` when present. On exhaustion, retain the pending submission and expose an actionable error. Agree the retry budget and support owner before production rollout. Unknown or non-JSON responses are never confirmation of success.\n\n## Outlook delivery\n\nHTTP 201 confirms the Counterpoint record is saved; it does not mean Outlook delivery finished. Poll the Event lookup for `calendar_status`:\n\n- `pending`: saved; Outlook work is queued or retrying.\n- `synced`: Outlook creation and its link are confirmed.\n- `action_required`: operator reconciliation is needed.\n- `outlook_deleted` or `cancelled`: reconcile the existing record; do not create another copy.\n\nTasks return `calendar_status: \"not_applicable\"`. Counterpoint owns Outlook retries. API idempotency is not a guarantee of exactly-once behavior across every external system.\n\n## Limits and scope\n\nCreate and lookup only. No edit/delete endpoints, pending reminders, recurrence, attendees, bulk imports, or automatic advisor creation. Unknown fields and query parameters are rejected. Timestamps require seconds and an explicit offset, without fractional seconds; the offset must agree with the IANA timezone. Use timezone `UTC` with `Z` timestamps. Events must end after their start and last at most 24 hours.\n\nThe current rate limit is 120 requests per minute per source IP per API process. This is not a throughput SLA. Use port **3002** for sandbox requests. Production access is supplied separately and uses a different credential.\n\n## Versions and changes\n\nThis site and its downloadable OpenAPI file are published from the same Git repository. [View the changelog](./changelog.html) for published changes. Compatible changes retain `/v1`; breaking changes require a separately agreed version and migration period. Documentation describes released behavior, not proposed features.\n"
+  },
+  "servers": [
+    {
+      "url": "https://c.cpfunds.com:3002/api/integrations/salesforce",
+      "description": "Sandbox: test key, Jeff, fictional advisors only"
+    }
+  ],
+  "security": [
+    {
+      "SalesforceToken": []
+    }
+  ],
+  "paths": {
+    "/v1/health": {
+      "get": {
+        "operationId": "salesforceHealth",
+        "summary": "Credential and configuration check; not downstream readiness",
+        "responses": {
+          "200": {
+            "description": "Enabled and authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "status",
+                    "api_version",
+                    "environment"
+                  ],
+                  "properties": {
+                    "status": {
+                      "const": "ok"
+                    },
+                    "api_version": {
+                      "const": "1"
+                    },
+                    "environment": {
+                      "type": "string",
+                      "enum": [
+                        "test",
+                        "production"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed request",
+            "headers": {
+              "X-Correlation-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid credential",
+            "headers": {
+              "X-Correlation-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Unauthorized owner",
+            "headers": {
+              "X-Correlation-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "headers": {
+              "X-Correlation-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Identity or meeting conflict",
+            "headers": {
+              "X-Correlation-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Body exceeds 32 KB",
+            "headers": {
+              "X-Correlation-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "JSON required",
+            "headers": {
+              "X-Correlation-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid business fields",
+            "headers": {
+              "X-Correlation-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit",
+            "headers": {
+              "X-Correlation-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unconfirmed outcome; retry same request with bounds",
+            "headers": {
+              "X-Correlation-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Unavailable; inspect retryable",
+            "headers": {
+              "X-Correlation-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "Health"
+        ]
+      }
+    },
+    "/v1/events": {
+      "post": {
+        "operationId": "createSalesforceMeeting",
+        "summary": "Create one linked meeting and queue Outlook appointment",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MeetingCreate"
+              },
+              "example": {
+                "wsname": "Jeff",
+                "advisor_repcrd": "2147483000",
+                "salesforce_created_by_id": "005000000000000001",
+                "timezone": "UTC",
+                "internal_notes": "Fictional sandbox test.",
+                "request_id": "48b0663a-6074-46db-a975-c05c80a586c9",
+                "salesforce_record_id": "00U000000000000001",
+                "start_at": "2026-10-20T23:00:00Z",
+                "end_at": "2026-10-20T23:15:00Z"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Meeting saved, calendar queued",
+            "headers": {
+              "X-Correlation-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MeetingCreated"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Identical request replay",
+            "headers": {
+              "X-Correlation-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MeetingCreated"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed request",
+            "headers": {
+              "X-Correlation-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid credential",
+            "headers": {
+              "X-Correlation-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Unauthorized owner",
+            "headers": {
+              "X-Correlation-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "headers": {
+              "X-Correlation-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Identity or meeting conflict",
+            "headers": {
+              "X-Correlation-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Body exceeds 32 KB",
+            "headers": {
+              "X-Correlation-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "JSON required",
+            "headers": {
+              "X-Correlation-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid business fields",
+            "headers": {
+              "X-Correlation-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit",
+            "headers": {
+              "X-Correlation-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unconfirmed outcome; retry same request with bounds",
+            "headers": {
+              "X-Correlation-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Unavailable; inspect retryable",
+            "headers": {
+              "X-Correlation-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "Events"
+        ]
+      }
+    },
+    "/v1/events/by-salesforce/{salesforce_record_id}": {
+      "get": {
+        "operationId": "getSalesforceMeetingStatus",
+        "summary": "Recover a meeting ID and observed calendar status",
+        "parameters": [
+          {
+            "name": "salesforce_record_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^00U[A-Za-z0-9]{15}$",
+              "description": "18-character Salesforce Event ID"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Linked meeting status",
+            "headers": {
+              "X-Correlation-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MeetingStatus"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed request",
+            "headers": {
+              "X-Correlation-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid credential",
+            "headers": {
+              "X-Correlation-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Unauthorized owner",
+            "headers": {
+              "X-Correlation-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "headers": {
+              "X-Correlation-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Identity or meeting conflict",
+            "headers": {
+              "X-Correlation-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Body exceeds 32 KB",
+            "headers": {
+              "X-Correlation-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "JSON required",
+            "headers": {
+              "X-Correlation-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid business fields",
+            "headers": {
+              "X-Correlation-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit",
+            "headers": {
+              "X-Correlation-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unconfirmed outcome; retry same request with bounds",
+            "headers": {
+              "X-Correlation-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Unavailable; inspect retryable",
+            "headers": {
+              "X-Correlation-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "Events"
+        ]
+      }
+    },
+    "/v1/tasks": {
+      "post": {
+        "operationId": "salesforceTaskCreate",
+        "summary": "Record a completed sales interaction; no Outlook event",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TaskCreate"
+              },
+              "example": {
+                "wsname": "Jeff",
+                "advisor_repcrd": "2147483000",
+                "salesforce_created_by_id": "005000000000000001",
+                "timezone": "UTC",
+                "internal_notes": "Fictional sandbox test.",
+                "request_id": "39d53c71-2cc4-4a31-bd17-9f31ac4de66d",
+                "salesforce_record_id": "00T000000000000001",
+                "subject": "Sandbox sales interaction",
+                "call_type": "Call",
+                "status": "Completed",
+                "occurred_at": "2026-10-12T18:00:00Z"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Completed activity saved; no calendar event",
+            "headers": {
+              "X-Correlation-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskCreated"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Identical request replay",
+            "headers": {
+              "X-Correlation-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskCreated"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed request",
+            "headers": {
+              "X-Correlation-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid credential",
+            "headers": {
+              "X-Correlation-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Unauthorized owner",
+            "headers": {
+              "X-Correlation-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "headers": {
+              "X-Correlation-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Identity or activity conflict",
+            "headers": {
+              "X-Correlation-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Body exceeds 32 KB",
+            "headers": {
+              "X-Correlation-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "JSON required",
+            "headers": {
+              "X-Correlation-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid business fields",
+            "headers": {
+              "X-Correlation-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit",
+            "headers": {
+              "X-Correlation-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unconfirmed outcome; retry same request with bounds",
+            "headers": {
+              "X-Correlation-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Unavailable; inspect retryable",
+            "headers": {
+              "X-Correlation-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "Tasks"
+        ]
+      }
+    },
+    "/v1/meetings": {
+      "post": {
+        "operationId": "createSalesforceMeetingLegacyAlias",
+        "summary": "Create one linked meeting and queue Outlook appointment",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MeetingCreate"
+              },
+              "example": {
+                "wsname": "Jeff",
+                "advisor_repcrd": "2147483000",
+                "salesforce_created_by_id": "005000000000000001",
+                "timezone": "UTC",
+                "internal_notes": "Fictional sandbox test.",
+                "request_id": "48b0663a-6074-46db-a975-c05c80a586c9",
+                "salesforce_record_id": "00U000000000000001",
+                "start_at": "2026-10-20T23:00:00Z",
+                "end_at": "2026-10-20T23:15:00Z"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Meeting saved, calendar queued",
+            "headers": {
+              "X-Correlation-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MeetingCreated"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Identical request replay",
+            "headers": {
+              "X-Correlation-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MeetingCreated"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed request",
+            "headers": {
+              "X-Correlation-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid credential",
+            "headers": {
+              "X-Correlation-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Unauthorized owner",
+            "headers": {
+              "X-Correlation-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "headers": {
+              "X-Correlation-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Identity or meeting conflict",
+            "headers": {
+              "X-Correlation-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Body exceeds 32 KB",
+            "headers": {
+              "X-Correlation-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "JSON required",
+            "headers": {
+              "X-Correlation-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid business fields",
+            "headers": {
+              "X-Correlation-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit",
+            "headers": {
+              "X-Correlation-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unconfirmed outcome; retry same request with bounds",
+            "headers": {
+              "X-Correlation-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Unavailable; inspect retryable",
+            "headers": {
+              "X-Correlation-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "deprecated": true,
+        "tags": [
+          "Legacy aliases"
+        ]
+      }
+    },
+    "/v1/tasks/by-salesforce/{salesforce_record_id}": {
+      "get": {
+        "operationId": "salesforceTaskLookup",
+        "summary": "Look up a linked sales activity",
+        "parameters": [
+          {
+            "name": "salesforce_record_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^00T[A-Za-z0-9]{15}$",
+              "description": "18-character Salesforce Task ID"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Linked activity status",
+            "headers": {
+              "X-Correlation-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskStatus"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed request",
+            "headers": {
+              "X-Correlation-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid credential",
+            "headers": {
+              "X-Correlation-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Unauthorized owner",
+            "headers": {
+              "X-Correlation-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "headers": {
+              "X-Correlation-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Identity or activity conflict",
+            "headers": {
+              "X-Correlation-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Body exceeds 32 KB",
+            "headers": {
+              "X-Correlation-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "JSON required",
+            "headers": {
+              "X-Correlation-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid business fields",
+            "headers": {
+              "X-Correlation-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit",
+            "headers": {
+              "X-Correlation-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unconfirmed outcome; retry same request with bounds",
+            "headers": {
+              "X-Correlation-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Unavailable; inspect retryable",
+            "headers": {
+              "X-Correlation-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "Tasks"
+        ]
+      }
+    },
+    "/v1/meetings/by-salesforce/{salesforce_record_id}": {
+      "get": {
+        "operationId": "getSalesforceMeetingStatusLegacyAlias",
+        "summary": "Recover a meeting ID and observed calendar status",
+        "parameters": [
+          {
+            "name": "salesforce_record_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^00U[A-Za-z0-9]{15}$",
+              "description": "18-character Salesforce Event ID"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Linked meeting status",
+            "headers": {
+              "X-Correlation-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MeetingStatus"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed request",
+            "headers": {
+              "X-Correlation-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid credential",
+            "headers": {
+              "X-Correlation-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Unauthorized owner",
+            "headers": {
+              "X-Correlation-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "headers": {
+              "X-Correlation-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Identity or meeting conflict",
+            "headers": {
+              "X-Correlation-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Body exceeds 32 KB",
+            "headers": {
+              "X-Correlation-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "JSON required",
+            "headers": {
+              "X-Correlation-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid business fields",
+            "headers": {
+              "X-Correlation-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit",
+            "headers": {
+              "X-Correlation-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unconfirmed outcome; retry same request with bounds",
+            "headers": {
+              "X-Correlation-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Unavailable; inspect retryable",
+            "headers": {
+              "X-Correlation-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "deprecated": true,
+        "tags": [
+          "Legacy aliases"
+        ]
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "SalesforceToken": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "Opaque API key"
+      }
+    },
+    "schemas": {
+      "MeetingCreate": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "request_id",
+          "salesforce_record_id",
+          "salesforce_created_by_id",
+          "wsname",
+          "advisor_repcrd",
+          "start_at",
+          "end_at",
+          "timezone"
+        ],
+        "properties": {
+          "request_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$",
+            "description": "UUID v4 persisted and reused for retries"
+          },
+          "salesforce_record_id": {
+            "type": "string",
+            "pattern": "^00U[A-Za-z0-9]{15}$",
+            "description": "18-character Salesforce Event ID"
+          },
+          "salesforce_created_by_id": {
+            "type": "string",
+            "pattern": "^005[A-Za-z0-9]{15}$"
+          },
+          "wsname": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100,
+            "description": "Exact allowlisted active Counterpoint username"
+          },
+          "advisor_repcrd": {
+            "type": "string",
+            "pattern": "^[1-9][0-9]{0,11}$"
+          },
+          "start_at": {
+            "type": "string",
+            "format": "date-time",
+            "pattern": "^\\d{4}-\\d\\d-\\d\\dT\\d\\d:\\d\\d:\\d\\d(Z|[+-]\\d\\d:\\d\\d)$",
+            "description": "Seconds, no fractional seconds; clock and offset must match timezone"
+          },
+          "end_at": {
+            "type": "string",
+            "format": "date-time",
+            "pattern": "^\\d{4}-\\d\\d-\\d\\dT\\d\\d:\\d\\d:\\d\\d(Z|[+-]\\d\\d:\\d\\d)$",
+            "description": "After start, at most 24 hours later; clock and offset must match timezone"
+          },
+          "timezone": {
+            "type": "string",
+            "maxLength": 100,
+            "description": "IANA name or UTC; must agree with timestamp offsets"
+          },
+          "internal_notes": {
+            "type": "string",
+            "maxLength": 16000,
+            "default": "",
+            "description": "Internal only. Never sent to Outlook"
+          }
+        }
+      },
+      "MeetingStatus": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "counterpoint_meeting_id",
+          "salesforce_record_id",
+          "calendar_status"
+        ],
+        "properties": {
+          "counterpoint_meeting_id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "salesforce_record_id": {
+            "type": "string",
+            "pattern": "^00U[A-Za-z0-9]{15}$",
+            "description": "18-character Salesforce Event ID"
+          },
+          "calendar_status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "synced",
+              "action_required",
+              "outlook_deleted",
+              "cancelled"
+            ]
+          }
+        }
+      },
+      "MeetingCreated": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "counterpoint_meeting_id",
+          "salesforce_record_id",
+          "calendar_status",
+          "reused"
+        ],
+        "properties": {
+          "counterpoint_meeting_id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "salesforce_record_id": {
+            "type": "string",
+            "pattern": "^00U[A-Za-z0-9]{15}$",
+            "description": "18-character Salesforce Event ID"
+          },
+          "calendar_status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "synced",
+              "action_required",
+              "outlook_deleted",
+              "cancelled"
+            ]
+          },
+          "reused": {
+            "type": "boolean"
+          }
+        }
+      },
+      "Error": {
+        "type": "object",
+        "required": [
+          "error",
+          "correlation_id"
+        ],
+        "properties": {
+          "correlation_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "error": {
+            "type": "object",
+            "required": [
+              "code",
+              "message",
+              "field",
+              "retryable"
+            ],
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              },
+              "field": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "retryable": {
+                "type": "boolean"
+              }
+            }
+          }
+        },
+        "example": {
+          "error": {
+            "code": "INVALID_FIELD",
+            "message": "Supply the exact Counterpoint wholesaler username.",
+            "field": "wsname",
+            "retryable": false
+          },
+          "correlation_id": "51dcce3a-1e3c-43a7-b9b1-a9b435718d84"
+        }
+      },
+      "TaskCreate": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "request_id",
+          "salesforce_record_id",
+          "salesforce_created_by_id",
+          "wsname",
+          "advisor_repcrd",
+          "timezone",
+          "subject",
+          "call_type",
+          "status",
+          "occurred_at"
+        ],
+        "properties": {
+          "request_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$",
+            "description": "UUID v4 persisted and reused for retries"
+          },
+          "salesforce_record_id": {
+            "type": "string",
+            "pattern": "^00T[A-Za-z0-9]{15}$",
+            "description": "18-character Salesforce Task ID"
+          },
+          "salesforce_created_by_id": {
+            "type": "string",
+            "pattern": "^005[A-Za-z0-9]{15}$"
+          },
+          "wsname": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100,
+            "description": "Exact allowlisted active Counterpoint username"
+          },
+          "advisor_repcrd": {
+            "type": "string",
+            "pattern": "^[1-9][0-9]{0,11}$"
+          },
+          "timezone": {
+            "type": "string",
+            "maxLength": 100,
+            "description": "IANA name or UTC; must agree with timestamp offsets"
+          },
+          "internal_notes": {
+            "type": "string",
+            "maxLength": 16000,
+            "default": "",
+            "description": "Internal only. Never sent to Outlook"
+          },
+          "subject": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 50
+          },
+          "call_type": {
+            "type": "string",
+            "enum": [
+              "Call",
+              "Email",
+              "Vmail",
+              "Vmail/Email",
+              "Other"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "const": "Completed"
+          },
+          "occurred_at": {
+            "type": "string",
+            "format": "date-time",
+            "pattern": "^\\d{4}-\\d\\d-\\d\\dT\\d\\d:\\d\\d:\\d\\d(Z|[+-]\\d\\d:\\d\\d)$",
+            "description": "Seconds, no fractional seconds; clock and offset must match timezone"
+          }
+        }
+      },
+      "TaskStatus": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "salesforce_record_id",
+          "calendar_status",
+          "counterpoint_activity_id",
+          "activity_status"
+        ],
+        "properties": {
+          "salesforce_record_id": {
+            "type": "string",
+            "pattern": "^00T[A-Za-z0-9]{15}$",
+            "description": "18-character Salesforce Task ID"
+          },
+          "calendar_status": {
+            "type": "string",
+            "const": "not_applicable"
+          },
+          "counterpoint_activity_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Existing Sales Activity ID in SuiteCRM calls"
+          },
+          "activity_status": {
+            "type": "string",
+            "description": "Current Sales Activity status; initially Completed, may change through the existing app"
+          }
+        }
+      },
+      "TaskCreated": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "salesforce_record_id",
+          "calendar_status",
+          "reused",
+          "counterpoint_activity_id",
+          "activity_status"
+        ],
+        "properties": {
+          "salesforce_record_id": {
+            "type": "string",
+            "pattern": "^00T[A-Za-z0-9]{15}$",
+            "description": "18-character Salesforce Task ID"
+          },
+          "calendar_status": {
+            "type": "string",
+            "const": "not_applicable"
+          },
+          "reused": {
+            "type": "boolean"
+          },
+          "counterpoint_activity_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Existing Sales Activity ID in SuiteCRM calls"
+          },
+          "activity_status": {
+            "type": "string",
+            "description": "Current Sales Activity status; initially Completed, may change through the existing app"
+          }
+        }
+      }
+    }
+  },
+  "tags": [
+    {
+      "name": "Health",
+      "description": "Verify the integration credential and environment."
+    },
+    {
+      "name": "Events",
+      "description": "Create scheduled meetings and recover their delivery status."
+    },
+    {
+      "name": "Tasks",
+      "description": "Record completed sales interactions."
+    },
+    {
+      "name": "Legacy aliases",
+      "description": "Compatibility routes. Use Events for new integrations."
+    }
+  ]
+}

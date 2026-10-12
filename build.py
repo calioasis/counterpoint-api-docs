@@ -20,6 +20,7 @@ for kind,label,description,reply in [
         constraints=[]
         if prop.get('description'): constraints.append(prop['description'])
         if prop.get('enum'): constraints.append('Values: '+', '.join(prop['enum']))
+        if 'const' in prop: constraints.append('Required value: '+str(prop['const']))
         if prop.get('format'): constraints.append('Format: '+prop['format'])
         if prop.get('pattern'): constraints.append('Pattern: '+prop['pattern'])
         for key in ['minLength','maxLength']: 
